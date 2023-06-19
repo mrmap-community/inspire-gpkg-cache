@@ -9,7 +9,7 @@ import requests
 from shapely import from_geojson, intersects, get_geometry, bounds, box, geometrycollections, union_all, multipolygons, to_geojson
 from osgeo import gdal
 from osgeo import ogr
-from gpkg import Gpkg
+from inspire_gpkg_cache.gpkg import Gpkg
 from datetime import datetime
 import math
 import json
