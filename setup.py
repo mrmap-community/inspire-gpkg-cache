@@ -42,7 +42,8 @@ setup(
     include_package_data=True,
     install_requires=[
         "shapely>=2.0.1",
-        "gdal>=3.0.4",
+        # FIXME: find a way to install the correct version for gdal pypi package on build stages.
+        # "gdal>=3.0.4", do not add this here. The version which will be installed for build depends on system gdal version.
         "gdal_utils>=3.7.0.0",
         "owslib>=0.25.0",
         "requests>=2.31.0",
