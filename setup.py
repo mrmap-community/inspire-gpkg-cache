@@ -42,7 +42,7 @@ setup(
     include_package_data=True,
     install_requires=[
         "shapely>=2.0.1",
-        "gdal>=3.6.2",
+        "gdal>=3.0.4",
         "gdal_utils>=3.7.0.0",
         "owslib>=0.25.0",
         "requests>=2.31.0",

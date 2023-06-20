@@ -9,7 +9,7 @@ build:
     python: "3.10"
   jobs:
     pre_build:
-      - gdal-config --version
+      - pip install GDAL==$(gdal-config --version)
       - python -m sphinx -b linkcheck docs/source _build/linkcheck
 
 python:

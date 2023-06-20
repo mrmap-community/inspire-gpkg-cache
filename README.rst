@@ -51,14 +51,20 @@ References
 Quick-Start
 -----------
 
+Install GDAL on your system
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 .. warning:: 
 
-    As pre requirement you need `gdal-bin` and `libgdal-dev` package installed on your system. 
     Bee clear that your system gdal version matches the version of the python gdal package.
 
+.. code-block:: bash
+
+    $ pip install GDAL==$(gdal-config --version)
+
+
 Install it as any other python lib:
-
-
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: bash
 
