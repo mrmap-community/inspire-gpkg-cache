@@ -51,10 +51,18 @@ References
 Quick-Start
 -----------
 
+.. warning:: 
+
+    As pre requirement you need `gdal-bin` and `libgdal-dev` package installed on your system. 
+    Bee clear that your system gdal version matches the version of the python gdal package.
+
 Install it as any other python lib:
+
+
 
 .. code-block:: bash
 
     $ pip install inspire-gpkg-cache
+
 
 See the `documentation <https://inspire-gpkg-cache.readthedocs.io/en/latest/index.html>`_ for details.
