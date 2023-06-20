@@ -61,6 +61,7 @@ Install GDAL on your system
 .. code-block:: bash
 
     $ pip install GDAL==$(gdal-config --version)
+    $ pip install gdal-utils>=3.7.0.0
 
 
 Install it as any other python lib:
