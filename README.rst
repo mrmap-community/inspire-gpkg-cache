@@ -29,13 +29,31 @@ The European SDI uses some extensions of the OGC/ISO standards, that allow such 
 
 * Raster data:
 
+<<<<<<< HEAD
   * INSPIRE View Service based on WMS 1.1.1 (https://github.com/INSPIRE-MIF/technical-guidelines/blob/2022.2/services/view-wms/ViewServices.pdf)
   * INSPIRE ATOM Feeds (https://inspire.ec.europa.eu/file/1554/download?token=Y_538IH4)
+=======
+Install GDAL on your system
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. warning:: 
+
+    Bee clear that your system gdal version matches the version of the python gdal package.
+
+.. code-block:: bash
+
+    $ pip install GDAL==$(gdal-config --version)
+
+
+Install it as any other python lib:
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+>>>>>>> 34d9a3bca3cceee9b694582c57461d8169f6f87e
 
 * Vector data:
   
   * OGC API Features (https://docs.ogc.org/is/17-069r4/17-069r4.html)
   * INSPIRE ATOM Feeds (https://inspire.ec.europa.eu/file/1554/download?token=Y_538IH4)
+
 
 
 See the `documentation <https://inspire-gpkg-cache.readthedocs.io/en/latest/index.html>`_ for details.
