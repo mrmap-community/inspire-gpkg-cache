@@ -1,26 +1,3 @@
 {
-<<<<<<< HEAD
     "esbonio.sphinx.confDir": ""
-=======
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv",
-  "python.linting.flake8Enabled": true,
-  "python.linting.flake8Args": [
-    "--ignore=E501,W503,W504",
-    "--remove-all-unused-imports",
-  ],
-  "python.linting.lintOnSave": true,
-  "python.analysis.diagnosticMode": "workspace",
-  "python.analysis.extraPaths": [
-    ".venv"
-  ],
-  "editor.formatOnSave": true,
-  "editor.codeActionsOnSave": {
-    "source.fixAll": true,
-    "source.organizeImports": true
-  },
-  "[python]": {
-    "editor.defaultFormatter": "ms-python.autopep8"
-  },
-  "python.formatting.provider": "none"
->>>>>>> 34d9a3bca3cceee9b694582c57461d8169f6f87e
 }
