@@ -12,6 +12,5 @@ OGC
 INSPIRE
 -------
 
-* Metadata - 
-* View Services -
-* Download Services -
+* Metadata - https://inspire.ec.europa.eu/document-tags/metadata
+* View / Download Services - https://inspire.ec.europa.eu/document-tags/network-services

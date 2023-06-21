@@ -20,7 +20,7 @@ It is extremly important to have the option to cache all relevant distributed da
 
 The European SDI uses some extensions of the OGC/ISO standards, that allow such an automatic caching method. 
 
-**Crucial extensions:**
+**Crucial INSPIRE extensions:**
 
 * Existence of persistent dataset identifiers
 * Unified interpretation of ISO19119 and ISO19115 metadata (https://github.com/INSPIRE-MIF/technical-guidelines/tree/2022.2/metadata/metadata-iso19139)
