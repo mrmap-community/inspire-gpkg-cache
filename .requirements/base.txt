@@ -1,5 +1,4 @@
 shapely==2.0.1
-gdal_utils==3.7.0.0
 owslib==0.25.0
 requests==2.31.0
 python-slugify==8.0.1
