@@ -1,20 +1,23 @@
-import os
-import logging
-from owslib.csw import CatalogueServiceWeb
-from owslib.wms import WebMapService
-from owslib import crs
-from owslib.fes import PropertyIsEqualTo
-import xml.etree.ElementTree as ET
-import requests
-from shapely import from_geojson, intersects, get_geometry, bounds, box, geometrycollections, union_all, multipolygons, to_geojson
-from osgeo import gdal
-from osgeo import ogr
-from inspire_gpkg_cache.gpkg import Gpkg
-from datetime import datetime
-import math
 import json
+import logging
+import math
+import os
 import uuid
+import xml.etree.ElementTree as ET
+from datetime import datetime
+
+import requests
+from osgeo import gdal, ogr
+from owslib import crs
+from owslib.csw import CatalogueServiceWeb
+from owslib.fes import PropertyIsEqualTo
+from owslib.wms import WebMapService
+from shapely import (bounds, box, from_geojson, geometrycollections,
+                     get_geometry, intersects, multipolygons, to_geojson,
+                     union_all)
 from slugify import slugify
+
+from inspire_gpkg_cache.gpkg import Gpkg
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL", "INFO"))
 log = logging.getLogger("SpatialDataCache")
@@ -158,118 +161,189 @@ class SpatialDataCache():
             pass
         return self.csw.records
 
+    def check_atom(self, service, dataset_type, spatial_dataset_identifier:str, epsg_id):
+        if service.serviceidentification.type == 'download' and service.serviceidentification.version == 'predefined ATOM':
+            log.info("found predefined atom")
+            r = requests.get(service.distribution.online[0].url)
+            # parse inspire service feed
+            tree = ET.fromstring(r.text)
+            # extract code and codespace from spatial_dataset_identifier - should be separated by / as demanded from inpsire
+            code = spatial_dataset_identifier.split('/')[-1]
+            # codespace is everything before this
+            codespace = spatial_dataset_identifier.rstrip(code)
+            # extract link for entry of the needed dataset identifier
+            entry = tree.findall("./{http://www.w3.org/2005/Atom}entry/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}spatial_dataset_identifier_code[.='" + code + "']/../{http://www.w3.org/2005/Atom}link[@rel='alternate']")
+            if (len(entry) > 0):
+                log.info(entry[0].attrib['href'])
+                # get dataset feed
+                r = requests.get(entry[0].attrib['href'])
+                # log.info(r.text)
+                tree = ET.fromstring(r.text)
+                if dataset_type == 'raster':
+                    format_mimetype = "image/tiff"
+                if dataset_type == 'vector':
+                    format_mimetype = "application/json; subtype=geojson"
+                # find entry with format and crs from metadata (original crs)
+                # http://www.opengis.net/def/crs/EPSG/25832 or ...
+                entry = tree.findall("./{http://www.w3.org/2005/Atom}entry/{http://www.w3.org/2005/Atom}category[@term='http://www.opengis.net/def/crs/EPSG/" + str(epsg_id) + "']/../{http://www.w3.org/2005/Atom}link[@type='" +  format_mimetype + "']")
+                if len(entry) > 0:
+                    # log.info('found appropriate atom dataset feed with crs from metadata and supported mimetype!')
+                    return service, False
+        return False, False
+
+    def check_wms(self, service, spatial_dataset_identifier:str):
+        if service.serviceidentification.type == 'view' and service.serviceidentification.version == 'OGC:WMS 1.1.1':
+            # check ouput format
+            for online_resource in service.distribution.online:
+                # log.info(str(online_resource.name) + " : " + str(online_resource.function) + " : " + str(online_resource.url))
+                if online_resource.url:
+                    r = requests.get(online_resource.url)
+                    tree = ET.fromstring(r.text)
+                    # check for tiff format
+                    formats = tree.findall(".//GetMap/Format")
+                    supports_tif = False
+                    for format in formats:
+                        # log.info(str(format.text))
+                        if format.text == 'image/tiff':
+                            supports_tif = True
+                        if supports_tif:
+                            log.info("WMS with supported output_format tif found: " + str(service.serviceidentification.title))
+                            # check for dataset layer coupling
+                            data_layer = tree.findall(".//Layer[Identifier='" + spatial_dataset_identifier + "']")
+                            if len(data_layer) == 1:
+                                log.info("WMS has a corresponding Layer with name: " + str(data_layer[0].find('Name').text))
+                                return service, str(data_layer[0].find('Name').text)
+        return False, False
+
+    def check_oaf(self, service, spatial_dataset_identifier:str):
+        if service.serviceidentification.type == 'download' and service.serviceidentification.version == 'ogcapifeatures':
+            return service, False
+        return False, False
+    
+    def check_wfs(self, service, spatial_dataset_identifier:str):
+        if service.serviceidentification.type == 'download' and service.serviceidentification.version == '2.0.0':
+            for online_resource in service.distribution.online:
+                # check all uris for getcapabilities 
+                log.info(str(online_resource.name) + " : " + str(online_resource.function) + " : " + str(online_resource.url))
+                if online_resource.url:
+                    r = requests.get(online_resource.url)
+                    tree = ET.fromstring(r.text)
+                    # check for tiff format
+                    formats = tree.findall(".//{http://www.opengis.net/ows/1.1}OperationsMetadata/{http://www.opengis.net/ows/1.1}Operation[@name='GetFeature']/{http://www.opengis.net/ows/1.1}Parameter[@name='outputFormat']/{http://www.opengis.net/ows/1.1}AllowedValues/{http://www.opengis.net/ows/1.1}Value")
+                    supports_geojson = False
+                    for format in formats:
+                        log.info(str(format.text))
+                        if format.text == 'application/json; subtype=geojson':
+                            supports_geojson = True
+                    if supports_geojson:
+                        log.info("geojson supported")
+                    else:
+                        log.info("server does not support geojson! - exit")
+                    # check for inspire spatial dataset identifier
+                    spatial_dataset_identifier_codes = tree.findall(".//{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}ExtendedCapabilities/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}SpatialDataSetIdentifier/{http://inspire.ec.europa.eu/schemas/common/1.0}Code")
+                    spatial_dataset_identifier_codespaces = tree.findall(".//{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}ExtendedCapabilities/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}SpatialDataSetIdentifier/{http://inspire.ec.europa.eu/schemas/common/1.0}Namespace")
+                    spatial_dataset_identifier_array = []
+                    for i in range(len(spatial_dataset_identifier_codes)):
+                        spatial_dataset_identifier_array.append(str(spatial_dataset_identifier_codespaces[i].text) + str(spatial_dataset_identifier_codes[i].text))
+                        log.info(str(spatial_dataset_identifier_codespaces[i].text) + str(spatial_dataset_identifier_codes[i].text))
+                    # find 
+                    index_of_featuretype = spatial_dataset_identifier_array.index(spatial_dataset_identifier)
+                    log.info("index of featuretype: " + str(index_of_featuretype))
+                    if isinstance(index_of_featuretype, int):
+                        # get name of featuretype
+                        featuretypenames = tree.findall(".//{http://www.opengis.net/wfs/2.0}FeatureTypeList/{http://www.opengis.net/wfs/2.0}FeatureType/{http://www.opengis.net/wfs/2.0}Name")
+                        for featuretype in featuretypenames:
+                            log.info("Found featuretype: " + featuretype.text)
+                        if len(featuretypenames) == 1:
+                            featuretype_to_request = featuretypenames[0].text
+                            log.info("wfs with featuretype " + featuretype_to_request + " found for downloading data!")
+                        else:
+                            log.info("no featuretype found for downloading dataset!")
+        return False, False
+
+    def check_download_options(self, service, spatial_dataset_identifier:str):
+        """
+        Method for check which possible options for downloading the dataset exists  
+        """
+        possible_dataset_type = None
+        service_type = None
+        service_version = None
+        access_uri = None
+        error_messages = []
+        # classify type of service (wms/wfs/oaf/atom/...) from the information in the service metadata
+        if service.serviceidentification.type == 'view':
+            if service.serviceidentification.version == 'OGC:WMS 1.1.1':
+                service_type = 'wms'
+                # check uri for getcapabilities
+                # check version
+                # check getcapabilities - maybe some 401 - store needed auth type
+                # check version
+                # check if layer for dataset is available
+                # check formats and crs
+                possible_dataset_type = 'raster'
+        if service.serviceidentification.type == 'download':
+            if service.serviceidentification.version == 'ogcapifeatures':
+                service_type = 'oaf'
+                possible_dataset_type = 'vector'
+            if service.serviceidentification.version == '2.0.0':
+                service_type = 'wfs'
+                # check uri for getcapabilities
+                # check version
+                # check getcapabilities - maybe some 401 - store needed auth type
+                # check version
+                # check if featuretype for dataset is available
+                # check formats and crs
+                possible_dataset_type = 'vector'
+            if service.serviceidentification.version == 'predefined ATOM':
+                service_type = 'atom'
+                # check returnable formats
+                # need to read all hrefs from dataset feed!
+                # check uri for service feed
+                # check if uri to dataset feed is available
+                # parse datasetfeed
+                # extract possible formats/mimetypes and crs
+                possible_dataset_type = 'vector' # or possible_dataset_types.append('raster')
+        if possible_dataset_type is not None:
+            error_messages.append('Service is not usable for downloading dataset') 
+        return service_type, service_version, possible_dataset_type, access_uri, error_messages
+
     def get_appropriate_service(self, dataset_type:str, spatial_dataset_identifier:str, services, epsg_id):
         if dataset_type == 'raster':
-            # option 1: wms with output_format image/tif
+            log.info("check services for raster download")
             for service in services:
-                if services[service].serviceidentification.type == 'view' and services[service].serviceidentification.version == 'OGC:WMS 1.1.1':
-                    # check ouput format
-                    for online_resource in services[service].distribution.online:
-                        # log.info(str(online_resource.name) + " : " + str(online_resource.function) + " : " + str(online_resource.url))
-                        if online_resource.url:
-                            r = requests.get(online_resource.url)
-                            tree = ET.fromstring(r.text)
-                            # check for tiff format
-                            formats = tree.findall(".//GetMap/Format")
-                            supports_tif = False
-                            for format in formats:
-                                # log.info(str(format.text))
-                                if format.text == 'image/tiff':
-                                    supports_tif = True
-                                if supports_tif:
-                                    log.info("WMS with supported output_format tif found: " + str(services[service].serviceidentification.title))
-                                    # check for dataset layer coupling
-                                    data_layer = tree.findall(".//Layer[Identifier='" + spatial_dataset_identifier + "']")
-                                    if len(data_layer) == 1:
-                                        log.info("WMS has a corresponding Layer with name: " + str(data_layer[0].find('Name').text))
-                                        return services[service], str(data_layer[0].find('Name').text)
-            # option 2: atom feeds with mimetype image/tif
-            for service in services:
-                log.info("in loop!")
-                log.info(services[service].serviceidentification.type)
-                if services[service].serviceidentification.type == 'download' and services[service].serviceidentification.version == 'predefined ATOM':
-                    log.info("found predefined atom based on wms interface")
-                    return services[service], False
-            return False, False
+                # option 1: wms with output_format image/tif
+                found_service, found_layer = self.check_wms(services[service], spatial_dataset_identifier)
+                if found_service:
+                    return found_service, found_layer, 'raster_wms'
+                # option 2: atom feeds with mimetype image/tif
+                found_service, found_layer = self.check_atom(services[service], dataset_type, spatial_dataset_identifier, epsg_id)
+                if found_service:
+                    return found_service, found_layer, 'raster_atom'
+            return False, False, False
         if dataset_type == 'vector':
             log.info("check services for vector download")
             # TODO: test list of services in special order - wfs, ogcapifeatures, atom feed, link, ...
             for service in services:
-                log.info("check: " + services[service].serviceidentification.type + " - " + services[service].serviceidentification.version)
-                if services[service].serviceidentification.type == 'download' and services[service].serviceidentification.version == '2.0.0':
-                    for online_resource in services[service].distribution.online:
-                        # check all uris for getcapabilities 
-                        log.info(str(online_resource.name) + " : " + str(online_resource.function) + " : " + str(online_resource.url))
-                        if online_resource.url:
-                            r = requests.get(online_resource.url)
-                            tree = ET.fromstring(r.text)
-                            # check for tiff format
-                            formats = tree.findall(".//{http://www.opengis.net/ows/1.1}OperationsMetadata/{http://www.opengis.net/ows/1.1}Operation[@name='GetFeature']/{http://www.opengis.net/ows/1.1}Parameter[@name='outputFormat']/{http://www.opengis.net/ows/1.1}AllowedValues/{http://www.opengis.net/ows/1.1}Value")
-                            supports_geojson = False
-                            for format in formats:
-                                log.info(str(format.text))
-                                if format.text == 'application/json; subtype=geojson':
-                                    supports_geojson = True
-                            if supports_geojson:
-                                log.info("geojson supported")
-                            else:
-                                log.info("server does not support geojson! - exit")
-                            # check for inspire spatial dataset identifier
-                            spatial_dataset_identifier_codes = tree.findall(".//{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}ExtendedCapabilities/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}SpatialDataSetIdentifier/{http://inspire.ec.europa.eu/schemas/common/1.0}Code")
-                            spatial_dataset_identifier_codespaces = tree.findall(".//{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}ExtendedCapabilities/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}SpatialDataSetIdentifier/{http://inspire.ec.europa.eu/schemas/common/1.0}Namespace")
-                            spatial_dataset_identifier_array = []
-                            for i in range(len(spatial_dataset_identifier_codes)):
-                                spatial_dataset_identifier_array.append(str(spatial_dataset_identifier_codespaces[i].text) + str(spatial_dataset_identifier_codes[i].text))
-                                log.info(str(spatial_dataset_identifier_codespaces[i].text) + str(spatial_dataset_identifier_codes[i].text))
+                # option 1: wfs with output_format geojson
+                found_service, found_layer = self.check_wfs(services[service], spatial_dataset_identifier)
+                if found_service:
+                    return found_service, found_layer, 'vector_wfs'
+                # option 2: oaf
+                found_service, found_layer = self.check_oaf(services[service], spatial_dataset_identifier)
+                if found_service:
+                    return found_service, found_layer, 'vector_oaf'
+                # option 3: atom feeds with mimetype application/geojson
+                found_service, found_layer = self.check_atom(services[service], dataset_type, spatial_dataset_identifier, epsg_id)
+                if found_service:
+                    return found_service, found_layer , 'vector_atom'
+            return False, False, False
 
-                            # find 
-                            index_of_featuretype = spatial_dataset_identifier_array.index(spatial_dataset_identifier)
-                            log.info("index of featuretype: " + str(index_of_featuretype))
-                            if isinstance(index_of_featuretype, int):
-                                # get name of featuretype
-                                featuretypenames = tree.findall(".//{http://www.opengis.net/wfs/2.0}FeatureTypeList/{http://www.opengis.net/wfs/2.0}FeatureType/{http://www.opengis.net/wfs/2.0}Name")
-                                for featuretype in featuretypenames:
-                                    log.info("Found featuretype: " + featuretype.text)
-                                if len(featuretypenames) == 1:
-                                    featuretype_to_request = featuretypenames[0].text
-                                    log.info("wfs with featuretype " + featuretype_to_request + " found for downloading data!")
-                                else:
-                                    log.info("nof featuretype found for downloading dataset!")
-                
-                if services[service].serviceidentification.type == 'download' and services[service].serviceidentification.version == 'ogcapifeatures':
-                    return services[service], False
-                if services[service].serviceidentification.type == 'download' and services[service].serviceidentification.version == 'predefined ATOM':
-                    r = requests.get(services[service].distribution.online[0].url)
-                    # parse inspire service feed
-                    tree = ET.fromstring(r.text)
-                    # extract code and codespace from spatial_dataset_identifier - should be separated by / as demanded from inpsire
-                    code = spatial_dataset_identifier.split('/')[-1]
-                    # codespace is everything before this
-                    codespace = spatial_dataset_identifier.rstrip(code)
-                    # extract link for entry of the needed dataset identifier
-                    entry = tree.findall("./{http://www.w3.org/2005/Atom}entry/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}spatial_dataset_identifier_code[.='" + code + "']/../{http://www.w3.org/2005/Atom}link[@rel='alternate']")
-                    if (len(entry) > 0):
-                        log.info(entry[0].attrib['href'])
-                        # get dataset feed
-                        r = requests.get(entry[0].attrib['href'])
-                        # log.info(r.text)
-                        tree = ET.fromstring(r.text)
-                        format_mimetype = "application/json; subtype=geojson"
-                        # find entry with format and crs from metadata (original crs)
-                        # http://www.opengis.net/def/crs/EPSG/25832 or ...
-                        entry = tree.findall("./{http://www.w3.org/2005/Atom}entry/{http://www.w3.org/2005/Atom}category[@term='http://www.opengis.net/def/crs/EPSG/" + str(epsg_id) + "']/../{http://www.w3.org/2005/Atom}link[@type='" +  format_mimetype + "']")
-                        if len(entry) > 0:
-                            # log.info('found appropriate atom dataset feed!')
-                            return services[service], False
-                
-            return False, False
-
-    def download_datacache(self, metadata_info, download_service, resource_name, dataset_type:str):
+    def download_datacache(self, metadata_info, download_service, resource_name, dataset_type:str, download_service_type:str):
         # log.info(type(download_service))
         dataset_file_array = []
         polygon_array = []
         polygon = from_geojson(self.area_of_interest_geojson)
-        if download_service.serviceidentification.version == 'OGC:WMS 1.1.1':
+        if download_service_type == 'raster_wms':
             log.info("download data via wms interface")
             bboxes = self.calculate_wms_bboxes(metadata_info)
             log.info("resource(layer/featuretype name): " + resource_name)
@@ -279,6 +353,8 @@ class SpatialDataCache():
             inc = 0
             for geom_box in bboxes:
                 # load image via owslib
+                # TODO: if server does not support gtiff - download png, generate tfw and convert to gtiff!
+                
                 tmp_image = wms.getmap(layers=[resource_name], styles=['default'], srs='EPSG:4326', bbox=(geom_box.bounds[0], geom_box.bounds[1], geom_box.bounds[2], geom_box.bounds[3]), size=(self.max_pixels, self.max_pixels), format='image/tiff', transparent=True)
                 out = open(metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".tif", 'wb')
                 out.write(tmp_image.read())
@@ -286,7 +362,7 @@ class SpatialDataCache():
                 dataset_file_array.append(metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".tif")
                 log.info("image " + str(inc) + " saved!")
                 inc = inc + 1
-        if download_service.serviceidentification.version == 'ogcapifeatures':
+        if download_service_type == 'vector_oaf':
             ogc_api_features_base_url = download_service.distribution.online[0].url
             polygon_box = polygon.bounds
             # add bbox value, limit, and format
@@ -320,7 +396,7 @@ class SpatialDataCache():
                 dataset_file_array.append(metadata_info['fileidentifier'] + "_json _" + str(inc_bboxes) + ".geojson")
                 inc_bboxes = inc_bboxes + 1
                 log.info("json saved!")
-        if download_service.serviceidentification.version == 'predefined ATOM':
+        if download_service_type == 'raster_atom' or download_service_type == 'vector_atom':
             r = requests.get(download_service.distribution.online[0].url)
             # parse inspire service feed
             tree = ET.fromstring(r.text)
@@ -333,7 +409,6 @@ class SpatialDataCache():
             # extract link for entry of the needed dataset identifier
             entry = tree.findall("./{http://www.w3.org/2005/Atom}entry/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}spatial_dataset_identifier_code[.='" + code + "']/../{http://www.w3.org/2005/Atom}link[@rel='alternate']")
             if (len(entry) > 0):
-                # log.info(entry[0].attrib['href'])
                 # get dataset feed
                 r = requests.get(entry[0].attrib['href'])
                 # log.info(r.text)
@@ -350,7 +425,6 @@ class SpatialDataCache():
                 if len(entry) > 0:
                     inc_bboxes = 0 
                     for link in entry:
-                        #log.info('link: ' + link.attrib['href'])
                         bbox_array = link.attrib['bbox'].split()
                         bbox_geom = box(float(bbox_array[1]), float(bbox_array[0]), float(bbox_array[3]), float(bbox_array[2]))
                         if intersects(polygon, bbox_geom):
@@ -360,15 +434,12 @@ class SpatialDataCache():
                             # download geojson data
                             r = requests.get(link.attrib['href'])
                             # save result to file 
-                            #data_file_name = metadata_info['file_identifier'] + "_" + str(count) + file_suffix
-                            #print(open_option)
                             out = open(metadata_info['fileidentifier'] + "_" + file_suffix + "_" + str(inc_bboxes) + "." + file_suffix, 'wb')
                             out.write(r.content)
                             out.close()
                             dataset_file_array.append(metadata_info['fileidentifier'] + "_" + file_suffix + "_" + str(inc_bboxes) + "." + file_suffix)
                             inc_bboxes = inc_bboxes + 1
                             log.info("tile saved!")
-                    # log.info('found appropriate atom dataset feed!')
             else:
                 log.info("don't found any entry for dataset in atom service feed!")
 
@@ -500,6 +571,23 @@ class SpatialDataCache():
         ET.register_namespace(prefix='xsi:schemaLocation', uri='http://www.isotc211.org/2005/gmd http://schemas.opengis.net/csw/2.0.2/profiles/apiso/1.0.0/apiso.xsd')
         return ET.tostring(tree)
 
+    def check_options(self):
+        for dataset in self.data_configuration['datasets']:
+            log.info(dataset['file_identifier'])
+            #self.resolve_dataset_metadata(dataset['file_identifier'])
+            metadata = self.resolve_dataset_metadata(dataset['file_identifier'])
+            if metadata:
+                log.info("metadata found")
+                metadata_info = self.extract_info_from_dataset_metadata(metadata)
+                log.info("Try to download " + metadata_info['title'] + " - type: " + dataset['type'] + " - sdi: " + str(metadata_info['spatial_dataset_identifier']))
+                services = self.get_coupled_services(str(metadata_info['spatial_dataset_identifier']))
+                log.info("number of found services: " + str(len(services)))
+                # debug - show service information
+                for service in services:
+                    log.info(services[service].serviceidentification.type + ' - ' + services[service].serviceidentification.version + ' : ' + services[service].distribution.online[0].url)
+                    log.info(json.dumps(self.check_download_options(services[service], str(metadata_info['spatial_dataset_identifier']))))
+                    # service_type, service_version, possible_dataset_type, access_uri, error_messages = self.check_download_options(services[service], str(metadata_info['spatial_dataset_identifier']))
+
     def generate_cache(self):
         """function to start generation of cache"""
         # delete geopackage if exists
@@ -507,7 +595,7 @@ class SpatialDataCache():
             os.remove(self.output_filename + '.gpkg')
         # initialize new geopackage
         gpkg = Gpkg(self.output_filename + '.gpkg')
-        # TODO: initialize one raster object to build up metadata tables - they are only build when importing raster data!
+        # Initialize one raster object to build up metadata tables - they are only build when importing raster data!
         # https://towardsdatascience.com/use-python-to-convert-polygons-to-raster-with-gdal-rasterizelayer-b0de1ec3267
         # https://www.programcreek.com/python/example/101827/gdal.RasterizeLayer
         self.create_initial_mask()
@@ -528,7 +616,11 @@ class SpatialDataCache():
                     os.remove(dataset['file_identifier'] + '.geojson')
                 services = self.get_coupled_services(str(metadata_info['spatial_dataset_identifier']))
                 log.info("number of found services: " + str(len(services)))
-                download_service, resource_name = self.get_appropriate_service(dataset['type'], str(metadata_info['spatial_dataset_identifier']), services, metadata_info['epsg_id'])
+                # debug - show service information
+                for service in services:
+                    log.info(services[service].serviceidentification.type + ' - ' + services[service].serviceidentification.version + ' : ' + services[service].distribution.online[0].url)
+
+                download_service, resource_name, download_service_type = self.get_appropriate_service(dataset['type'], str(metadata_info['spatial_dataset_identifier']), services, metadata_info['epsg_id'])
                 log.info("name of resource: " + str(resource_name))
                 log.info(download_service)
                 # get metadata string
@@ -537,7 +629,7 @@ class SpatialDataCache():
                 polygon_box = polygon.bounds
                 # TODO:  write area of interest to geopackage - as gtiff! - to generate the metadata structure
                 if download_service:
-                    dataset_file_array = self.download_datacache(metadata_info, download_service, resource_name, dataset['type'])
+                    dataset_file_array = self.download_datacache(metadata_info, download_service, resource_name, dataset['type'], download_service_type)
                     if len(dataset_file_array) > 0:
                         if dataset['type'] == 'raster':
                             dataset_aggregate_filename = dataset['file_identifier'] + '.tif'

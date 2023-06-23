@@ -7,7 +7,7 @@ r = requests.get(area_of_interest_uri)
 area_of_interest = r.text
 
 dataset_configuration = { "datasets": [ 
-                                        {"file_identifier": "2b115f1e-beb7-b0f8-d736-2b049d0e0f68", "type": "vector"},
+                                        {"file_identifier": "2b009ae4-aa3e-ff21-870b-49846d9561b2", "type": "raster"},
                                       ]
                         }
 
@@ -15,5 +15,4 @@ catalogue_uri = "https://gdk.gdi-de.org/gdi-de/srv/ger/csw"
 
 cache = SpatialDataCache(dataset_configuration, area_of_interest, catalogue_uri)
 
-# cache.check_options()
 cache.generate_cache()

@@ -1,8 +1,9 @@
-from inspire_gpkg_cache.spatial_data_cache import SpatialDataCache
 import requests
 
-area_of_interest_uri = "https://www.geoportal.rlp.de/spatial-objects/314/collections/vermkv:gemeinde_rlp/items?gemeinde=Mendig&f=json"
-area_of_interest_uri = "https://www.geoportal.rlp.de/spatial-objects/314/collections/vermkv:fluren_rlp/items/fluren_rlp.11660?f=json&gemeinde=Mendig&flur=3"
+from inspire_gpkg_cache.spatial_data_cache import SpatialDataCache
+
+area_of_interest_uri = "https://www.geoportal.rlp.de/spatial-objects/314/collections/vermkv:gemeinde_rlp/items?gemeinde=Ochtendung&f=json"
+#area_of_interest_uri = "https://www.geoportal.rlp.de/spatial-objects/314/collections/vermkv:fluren_rlp/items/fluren_rlp.11660?f=json&gemeinde=Mendig&flur=3"
 r = requests.get(area_of_interest_uri)
 area_of_interest = r.text
 dataset_configuration = { "datasets": [ {"file_identifier": "46f2d53e-6b79-284b-46a4-5f06c6248502", "type": "raster"},
@@ -22,4 +23,5 @@ dataset_configuration = { "datasets": [ {"file_identifier": "46f2d53e-6b79-284b-
                         }
 catalogue_uri = "https://vocabulary.geoportal.rlp.de/geonetwork/srv/ger/csw"
 cache = SpatialDataCache(dataset_configuration, area_of_interest, catalogue_uri)
+# cache.check_options()
 cache.generate_cache()
