@@ -268,24 +268,47 @@ class SpatialDataCache():
         possible_dataset_type = None
         service_type = None
         service_version = None
+        service_resource_name = None
         access_uri = None
         error_messages = []
         # classify type of service (wms/wfs/oaf/atom/...) from the information in the service metadata
-        if service.serviceidentification.type == 'view':
-            if service.serviceidentification.version == 'OGC:WMS 1.1.1':
+        if service.serviceidentification.type in ['view']:
+            if service.serviceidentification.version in ['OGC:WMS 1.1.1', 'OGC:WMS 1.3.0']:
                 service_type = 'wms'
                 # check uri for getcapabilities
-                # check version
-                # check getcapabilities - maybe some 401 - store needed auth type
-                # check version
-                # check if layer for dataset is available
-                # check formats and crs
-                possible_dataset_type = 'raster'
-        if service.serviceidentification.type == 'download':
-            if service.serviceidentification.version == 'ogcapifeatures':
+                # first check list of download urls from distribution metadata
+                for online_resource in service.distribution.online:
+                    if online_resource.url:
+                        # TODO: sanitize access url - add params if not already given 
+                        access_uri = online_resource.url
+                        r = requests.get(online_resource.url)
+                        # TODO: check for http 401
+                        tree = ET.fromstring(r.text)
+                        if tree.tag in ['WMS_Capabilities', 'WMT_MS_Capabilities']:
+                            # some wms found
+                            service_type = 'view'
+                            service_version = 'OGC:WMS ' + str(tree.attrib['version'])
+                            # check for tiff format
+                            formats = tree.findall(".//GetMap/Format")
+                            supports_tif = False
+                            for format in formats:
+                                if format.text == 'image/tiff':
+                                    supports_tif = True
+                            if supports_tif:
+                                data_layer = tree.findall(".//Layer[Identifier='" + spatial_dataset_identifier + "" + "']")
+                                if len(data_layer) == 1:
+                                    service_resource_name = str(data_layer[0].find('Name').text)
+                                    possible_dataset_type = 'raster'
+                                    break
+                                else:
+                                    error_messages.append('WMS ' + str(tree.attrib['version']) + ' : No corresponding layer found for the requested spatial dataset identifier')
+                            else:
+                                error_messages.append('WMS ' + str(tree.attrib['version']) + ' : outputFormat image/tiff not supported')
+        if service.serviceidentification.type in ['download']:
+            if service.serviceidentification.version in ['ogcapifeatures', 'OGC-API Features', '']:
                 service_type = 'oaf'
                 possible_dataset_type = 'vector'
-            if service.serviceidentification.version == '2.0.0':
+            if service.serviceidentification.version in ['2.0.0', 'OGC:WFS 2.0.0', 'OGC:WFS 1.1.0', 'OGC:WFS 2.0']:
                 service_type = 'wfs'
                 # check uri for getcapabilities
                 # check version
@@ -303,9 +326,9 @@ class SpatialDataCache():
                 # parse datasetfeed
                 # extract possible formats/mimetypes and crs
                 possible_dataset_type = 'vector' # or possible_dataset_types.append('raster')
-        if possible_dataset_type is not None:
+        if possible_dataset_type is None:
             error_messages.append('Service is not usable for downloading dataset') 
-        return service_type, service_version, possible_dataset_type, access_uri, error_messages
+        return service_type, service_version, possible_dataset_type, access_uri, service_resource_name, error_messages
 
     def get_appropriate_service(self, dataset_type:str, spatial_dataset_identifier:str, services, epsg_id):
         if dataset_type == 'raster':
