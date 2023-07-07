@@ -2,6 +2,8 @@ import json
 import logging
 import math
 import os
+import shutil
+import time
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -33,7 +35,7 @@ class SpatialDataCache():
     :type catalogue_uri: str
     """
 
-    def __init__(self, data_configuration:dict, area_of_interest_geojson:str, catalogue_uri:str):
+    def __init__(self, data_configuration:dict, area_of_interest_geojson:str, catalogue_uri:str, output_filename:str = False, output_folder:str = False):
         """Constructor method
         """
         self.data_configuration = data_configuration
@@ -43,8 +45,54 @@ class SpatialDataCache():
         self.supported_formats = ["GeoTIFF", "GML", "Database", "shapefile", ]
         self.max_pixels = 3000
         self.max_features = 5000
-        self.output_filename = 'spatialcache'
+        # self.output_folder = '/tmp/'
+        if output_filename:
+            self.output_filename = output_filename
+        else:
+            self.output_filename = 'spatialcache'
+        if output_folder:
+            self.output_folder = output_folder
+        else:
+            self.output_folder = ''
         self.area_of_interest_filename = 'area_of_interest'
+        self.dpi = 150
+        log.info("output_folder: " + str(self.output_folder))
+        if self.check_file_writable(self.output_folder + 'test.txt'):
+            log.info('Requested location is writeable')
+            self.path_writeable = True
+        else:
+            log.info('Cannot write to requested location!')
+            self.path_writeable = False
+        # create temporary folder in output folder to allow concurrent usages of lib
+        tmp_folder_name = str(uuid.uuid4());
+        # https://www.geeksforgeeks.org/create-a-directory-in-python/
+        tmp_path = os.path.join(self.output_folder, tmp_folder_name) 
+
+        try:
+            os.mkdir(tmp_path)
+        except:
+            log.info("could not create tmp folder: " + str(tmp_path))
+            self.path_writeable = False
+            self.tmp_output_folder = None
+        else:
+            log.info("tmp directory created: " + str(tmp_path))
+            self.path_writeable = True
+            self.tmp_output_folder = tmp_path + '/'
+
+    def check_file_writable(self, fnm):
+        # https://www.novixys.com/blog/python-check-file-can-read-write/
+        if os.path.exists(fnm):
+            # path exists
+            if os.path.isfile(fnm): # is it a file or a dir?
+                # also works when file is a link and the target is writable
+                return os.access(fnm, os.W_OK)
+            else:
+                return False # path is a dir, so cannot write as a file
+        # target does not exist, check perms on parent dir
+        pdir = os.path.dirname(fnm)
+        if not pdir: pdir = '.'
+        # target is creatable if parent dir is writable
+        return os.access(pdir, os.W_OK)    
 
     def create_initial_mask(self):
         """Function to generate a raster mask for the area of interest. The raster mask
@@ -54,13 +102,14 @@ class SpatialDataCache():
         """
         data_file_name = self.area_of_interest_filename + ".geojson" 
         open_option = "w"
-        area_of_interest_file = open(data_file_name, open_option)
+        area_of_interest_file = open(self.tmp_output_folder +  data_file_name, open_option)
         area_of_interest_file.write(self.area_of_interest_geojson)
         area_of_interest_file.close()
         polygon = from_geojson(self.area_of_interest_geojson)
         polygon_box = polygon.bounds
-        ds = gdal.Rasterize(self.area_of_interest_filename + ".tif",
-                    data_file_name,
+        #TODO: problem- rasterize does not allow complete path for destination file?
+        ds = gdal.Rasterize(self.tmp_output_folder + self.area_of_interest_filename + ".tif",
+                    self.tmp_output_folder + data_file_name,
                     creationOptions=["COMPRESS=DEFLATE"],
                     outputBounds=[polygon_box[0], polygon_box[1], polygon_box[2], polygon_box[3]],
                     xRes=0.00001,
@@ -97,6 +146,7 @@ class SpatialDataCache():
         metadata_info['spatial_res_type'] = ''
         metadata_info['spatial_res_value'] = ''
         metadata_info['spatial_res_value_uom'] = ''
+        metadata_info['calculated_ground_resolution'] = ''
         metadata_info['format'] = ''
         metadata_info['minx'] = ''
         metadata_info['miny'] = ''
@@ -111,34 +161,43 @@ class SpatialDataCache():
             metadata_info['miny'] = float(metadata.identification.bbox.miny)
             metadata_info['maxx'] = float(metadata.identification.bbox.maxx)
             metadata_info['maxy'] = float(metadata.identification.bbox.maxy)
-            log.info("bbox: " + str(metadata_info['minx']) + "," + str(metadata_info['miny']) + "," + str(metadata_info['maxx']) + "," + str(metadata_info['maxy']))
+            # log.info("bbox: " + str(metadata_info['minx']) + "," + str(metadata_info['miny']) + "," + str(metadata_info['maxx']) + "," + str(metadata_info['maxy']))
         if metadata.identification.uricode:
             metadata_info['spatial_dataset_identifier'] += metadata.identification.uricode[0]
         else:
-            log.info("uricode not set!")
+            # log.info("uricode not set!")
+            pass
         if metadata.identification.uricodespace:
             metadata_info['spatial_dataset_identifier'] += metadata.identification.uricodespace[0]
         else:
-            log.info("uricodespace not set!")
+            # log.info("uricodespace not set!")
+            pass
         log.info("Spatial Dataset Identifier from metadata record: " + metadata_info['spatial_dataset_identifier'])
-        if metadata.identification.distance:
+        if len(metadata.identification.distance) >= 1:
             if metadata.identification.uom[0] and metadata.identification.distance[0]:
                 uom = metadata.identification.uom[0].split("#")[1]
-                ground_resolution = float(metadata.identification.distance[0])
+                ground_resolution = float(metadata.identification.distance[0].replace('m', ''))
                 metadata_info['spatial_res_type'] = "groundResolution"
                 metadata_info['spatial_res_value'] = ground_resolution
                 metadata_info['spatial_res_value_uom'] = str(uom)
                 log.info("ground resolution: " + str(metadata_info['spatial_res_value']) + " " + str(uom))
-            else:
-                metadata_info['spatial_res_type'] = "scaleDenominator"
-                metadata_info['spatial_res_value'] = float(metadata.identification.distance[0])
-                log.info("scale denominator: " + str(metadata_info['spatial_res_value']))
+        if len(metadata.identification.denominators) >= 1:
+            metadata_info['spatial_res_type'] = "scaleDenominator"
+            metadata_info['spatial_res_value'] = float(metadata.identification.denominators[0])
+            log.info("scale denominator: " + str(metadata_info['spatial_res_value']))
+
+        if metadata_info['spatial_res_type'] == "scaleDenominator":
+            # calculate ground resolution
+            calculated_ground_resolution = 0.0254 / self.dpi * metadata_info['spatial_res_value']
+            log.info('calculated ground resolution: ' + str(calculated_ground_resolution))
+            metadata_info['calculated_ground_resolution'] = calculated_ground_resolution
         metadata_info['format'] = str(metadata.distribution.format)
         log.info("format: " + str(metadata_info['format']))
         if metadata.identification.title:
             metadata_info['title'] = metadata.identification.title
         if str(metadata.distribution.format) in self.supported_formats:
-            log.info("dataset metadata format supported!")
+            # log.info("dataset metadata format supported!")
+            pass
         if metadata.referencesystem.code:
             log.info(str(metadata.referencesystem.code))
             try:
@@ -163,7 +222,7 @@ class SpatialDataCache():
 
     def check_atom(self, service, dataset_type, spatial_dataset_identifier:str, epsg_id):
         if service.serviceidentification.type == 'download' and service.serviceidentification.version == 'predefined ATOM':
-            log.info("found predefined atom")
+            # log.info("found predefined atom")
             r = requests.get(service.distribution.online[0].url)
             # parse inspire service feed
             tree = ET.fromstring(r.text)
@@ -174,7 +233,7 @@ class SpatialDataCache():
             # extract link for entry of the needed dataset identifier
             entry = tree.findall("./{http://www.w3.org/2005/Atom}entry/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}spatial_dataset_identifier_code[.='" + code + "']/../{http://www.w3.org/2005/Atom}link[@rel='alternate']")
             if (len(entry) > 0):
-                log.info(entry[0].attrib['href'])
+                # log.info(entry[0].attrib['href'])
                 # get dataset feed
                 r = requests.get(entry[0].attrib['href'])
                 # log.info(r.text)
@@ -201,17 +260,16 @@ class SpatialDataCache():
                     tree = ET.fromstring(r.text)
                     # check for tiff format
                     formats = tree.findall(".//GetMap/Format")
-                    supports_tif = False
+                    supports_png = False
                     for format in formats:
-                        # log.info(str(format.text))
-                        if format.text == 'image/tiff':
-                            supports_tif = True
-                        if supports_tif:
-                            log.info("WMS with supported output_format tif found: " + str(service.serviceidentification.title))
+                        if format.text == 'image/png':
+                            supports_png = True
+                        if supports_png:
+                            # log.info("WMS with supported output_format tif found: " + str(service.serviceidentification.title))
                             # check for dataset layer coupling
                             data_layer = tree.findall(".//Layer[Identifier='" + spatial_dataset_identifier + "']")
                             if len(data_layer) == 1:
-                                log.info("WMS has a corresponding Layer with name: " + str(data_layer[0].find('Name').text))
+                                # log.info("WMS has a corresponding Layer with name: " + str(data_layer[0].find('Name').text))
                                 return service, str(data_layer[0].find('Name').text)
         return False, False
 
@@ -232,13 +290,14 @@ class SpatialDataCache():
                     formats = tree.findall(".//{http://www.opengis.net/ows/1.1}OperationsMetadata/{http://www.opengis.net/ows/1.1}Operation[@name='GetFeature']/{http://www.opengis.net/ows/1.1}Parameter[@name='outputFormat']/{http://www.opengis.net/ows/1.1}AllowedValues/{http://www.opengis.net/ows/1.1}Value")
                     supports_geojson = False
                     for format in formats:
-                        log.info(str(format.text))
+                        # log.info(str(format.text))
                         if format.text == 'application/json; subtype=geojson':
                             supports_geojson = True
                     if supports_geojson:
-                        log.info("geojson supported")
+                        # log.info("geojson supported")
+                        pass
                     else:
-                        log.info("server does not support geojson! - exit")
+                        log.info("WFS server does not support geojson! - exit")
                     # check for inspire spatial dataset identifier
                     spatial_dataset_identifier_codes = tree.findall(".//{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}ExtendedCapabilities/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}SpatialDataSetIdentifier/{http://inspire.ec.europa.eu/schemas/common/1.0}Code")
                     spatial_dataset_identifier_codespaces = tree.findall(".//{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}ExtendedCapabilities/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}SpatialDataSetIdentifier/{http://inspire.ec.europa.eu/schemas/common/1.0}Namespace")
@@ -248,22 +307,24 @@ class SpatialDataCache():
                         log.info(str(spatial_dataset_identifier_codespaces[i].text) + str(spatial_dataset_identifier_codes[i].text))
                     # find 
                     index_of_featuretype = spatial_dataset_identifier_array.index(spatial_dataset_identifier)
-                    log.info("index of featuretype: " + str(index_of_featuretype))
+                    # log.info("index of featuretype: " + str(index_of_featuretype))
                     if isinstance(index_of_featuretype, int):
                         # get name of featuretype
                         featuretypenames = tree.findall(".//{http://www.opengis.net/wfs/2.0}FeatureTypeList/{http://www.opengis.net/wfs/2.0}FeatureType/{http://www.opengis.net/wfs/2.0}Name")
                         for featuretype in featuretypenames:
-                            log.info("Found featuretype: " + featuretype.text)
+                            # log.info("Found featuretype: " + featuretype.text)
+                            pass
                         if len(featuretypenames) == 1:
                             featuretype_to_request = featuretypenames[0].text
-                            log.info("wfs with featuretype " + featuretype_to_request + " found for downloading data!")
+                            # log.info("wfs with featuretype " + featuretype_to_request + " found for downloading data!")
                         else:
-                            log.info("no featuretype found for downloading dataset!")
+                            log.info("no WFS featuretype found for downloading dataset!")
         return False, False
 
-    def check_download_options(self, service, spatial_dataset_identifier:str):
+    def check_download_options(self, service, spatial_dataset_identifier:str, epsg_id:str):
         """
-        Method for check which possible options for downloading the dataset exists  
+        Method to check the possible download options of the service. If some information is missing,
+        the occuring problems are returned in an error message array.
         """
         possible_dataset_type = None
         service_type = None
@@ -271,6 +332,7 @@ class SpatialDataCache():
         service_resource_name = None
         access_uri = None
         error_messages = []
+        return_object = {}
         # classify type of service (wms/wfs/oaf/atom/...) from the information in the service metadata
         if service.serviceidentification.type in ['view']:
             if service.serviceidentification.version in ['OGC:WMS 1.1.1', 'OGC:WMS 1.3.0']:
@@ -284,17 +346,18 @@ class SpatialDataCache():
                         r = requests.get(online_resource.url)
                         # TODO: check for http 401
                         tree = ET.fromstring(r.text)
+                        # TODO: set namespace for wms 1.3.0 !
                         if tree.tag in ['WMS_Capabilities', 'WMT_MS_Capabilities']:
                             # some wms found
                             service_type = 'view'
                             service_version = 'OGC:WMS ' + str(tree.attrib['version'])
-                            # check for tiff format
+                            # check for png format
                             formats = tree.findall(".//GetMap/Format")
-                            supports_tif = False
+                            supports_png = False
                             for format in formats:
-                                if format.text == 'image/tiff':
-                                    supports_tif = True
-                            if supports_tif:
+                                if format.text == 'image/png':
+                                    supports_png = True
+                            if supports_png:
                                 data_layer = tree.findall(".//Layer[Identifier='" + spatial_dataset_identifier + "" + "']")
                                 if len(data_layer) == 1:
                                     service_resource_name = str(data_layer[0].find('Name').text)
@@ -303,42 +366,131 @@ class SpatialDataCache():
                                 else:
                                     error_messages.append('WMS ' + str(tree.attrib['version']) + ' : No corresponding layer found for the requested spatial dataset identifier')
                             else:
-                                error_messages.append('WMS ' + str(tree.attrib['version']) + ' : outputFormat image/tiff not supported')
+                                error_messages.append('WMS ' + str(tree.attrib['version']) + ' : outputFormat image/png not supported')
         if service.serviceidentification.type in ['download']:
-            if service.serviceidentification.version in ['ogcapifeatures', 'OGC-API Features', '']:
+            if service.serviceidentification.version in ['ogcapifeatures', 'OGC-API Features']:
                 service_type = 'oaf'
-                possible_dataset_type = 'vector'
+                # first check list of download urls from distribution metadata
+                for online_resource in service.distribution.online:
+                    if online_resource.url:
+                        # TODO: sanitize access url - add params if not already given 
+                        access_uri = online_resource.url
+                        r = requests.get(online_resource.url) # TODO: set header to json - maybe html is the default returned format
+                        # check if collection or api or s.th. else was given back!
+                        possible_dataset_type = 'vector'
             if service.serviceidentification.version in ['2.0.0', 'OGC:WFS 2.0.0', 'OGC:WFS 1.1.0', 'OGC:WFS 2.0']:
                 service_type = 'wfs'
                 # check uri for getcapabilities
-                # check version
-                # check getcapabilities - maybe some 401 - store needed auth type
-                # check version
-                # check if featuretype for dataset is available
-                # check formats and crs
-                possible_dataset_type = 'vector'
-            if service.serviceidentification.version == 'predefined ATOM':
-                service_type = 'atom'
+                # first check list of download urls from distribution metadata
+                for online_resource in service.distribution.online:
+                    if online_resource.url:
+                        # TODO: sanitize access url - add params if not already given 
+                        access_uri = online_resource.url
+                        r = requests.get(online_resource.url)
+                        # TODO: check for http 401
+                        tree = ET.fromstring(r.text)
+                        if str(tree.tag) in ['{http://www.opengis.net/wfs}WFS_Capabilities', '{http://www.opengis.net/wfs/2.0}WFS_Capabilities']:
+                            # some wms found
+                            service_type = 'download'
+                            service_version = 'OGC:WFS ' + str(tree.attrib['version'])
+                            # check for geojson format
+                            if  str(tree.attrib['version']) == '1.1.0':
+                                formats = tree.findall(".//{http://www.opengis.net/ows}OperationsMetadata/{http://www.opengis.net/ows}Operation[@name='GetFeature']/{http://www.opengis.net/ows}Parameter[@name='outputFormat']/{http://www.opengis.net/ows}Value")
+                            if str(tree.attrib['version']) == '2.0.0':
+                                formats = tree.findall(".//{http://www.opengis.net/ows/1.1}OperationsMetadata/{http://www.opengis.net/ows/1.1}Operation[@name='GetFeature']/{http://www.opengis.net/ows/1.1}Parameter[@name='outputFormat']/{http://www.opengis.net/ows/1.1}AllowedValues/{http://www.opengis.net/ows/1.1}Value")
+                            supports_geojson = False
+                            for format in formats:
+                                if format.text == 'application/json; subtype=geojson':
+                                    supports_geojson = True
+                            if supports_geojson:
+                                # log.info("geojson supported")
+                                pass
+                            else:
+                                error_messages.append('WFS ' + str(tree.attrib['version']) + ' : outputFormat application/json; subtype=geojson not supported')
+                            # check for inspire spatial dataset identifier
+                            spatial_dataset_identifier_codes = tree.findall(".//{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}ExtendedCapabilities/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}SpatialDataSetIdentifier/{http://inspire.ec.europa.eu/schemas/common/1.0}Code")
+                            spatial_dataset_identifier_codespaces = tree.findall(".//{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}ExtendedCapabilities/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}SpatialDataSetIdentifier/{http://inspire.ec.europa.eu/schemas/common/1.0}Namespace")
+                            spatial_dataset_identifier_array = []
+                            for i in range(len(spatial_dataset_identifier_codes)):
+                                spatial_dataset_identifier_array.append(str(spatial_dataset_identifier_codespaces[i].text) + str(spatial_dataset_identifier_codes[i].text))
+                                log.info(str(spatial_dataset_identifier_codespaces[i].text) + str(spatial_dataset_identifier_codes[i].text))
+                            # find 
+                            index_of_featuretype = spatial_dataset_identifier_array.index(spatial_dataset_identifier)
+                            # log.info("index of featuretype: " + str(index_of_featuretype))
+                            if isinstance(index_of_featuretype, int):
+                                # get name of featuretype
+                                if  str(tree.attrib['version']) == '1.1.0':
+                                    featuretypenames = tree.findall(".//{http://www.opengis.net/wfs}FeatureTypeList/{http://www.opengis.net/wfs}FeatureType/{http://www.opengis.net/wfs}Name")
+                                if  str(tree.attrib['version']) == '2.0.0':
+                                    featuretypenames = tree.findall(".//{http://www.opengis.net/wfs/2.0}FeatureTypeList/{http://www.opengis.net/wfs/2.0}FeatureType/{http://www.opengis.net/wfs/2.0}Name")
+                                for featuretype in featuretypenames:
+                                    log.info("Found featuretype: " + featuretype.text)
+                                if len(featuretypenames) == 1:
+                                    service_resource_name = featuretypenames[0].text
+                                    possible_dataset_type = 'vector'
+                                else:
+                                    error_messages.append('WFS ' + str(tree.attrib['version']) + ' : no featuretype found for downloading dataset')
+                            else:
+                                error_messages.append('No corresponding INSPIRE Spatial Dataset Identifier found in Capabilities')
+                        else:
+                            error_messages.append('No WFS_Capabilities Tag found in xml')
+            if service.serviceidentification.version in ['predefined ATOM', 'Predefined Atom']:
+                service_type = 'download'
+                service_version = 'predefined ATOM'
+                r = requests.get(service.distribution.online[0].url)
+                # parse inspire service feed
+                tree = ET.fromstring(r.text)
+                # extract code and codespace from spatial_dataset_identifier - should be separated by / as demanded from inpsire
+                code = spatial_dataset_identifier.split('/')[-1]
+                # codespace is everything before this
+                codespace = spatial_dataset_identifier.rstrip(code)
+                # extract link for entry of the needed dataset identifier
+                entry = tree.findall("./{http://www.w3.org/2005/Atom}entry/{http://inspire.ec.europa.eu/schemas/inspire_dls/1.0}spatial_dataset_identifier_code[.='" + code + "']/../{http://www.w3.org/2005/Atom}link[@rel='alternate']")
+                if (len(entry) > 0):
+                    #log.info(entry[0].attrib['href'])
+                    # get dataset feed
+                    r = requests.get(entry[0].attrib['href'])
+                    # log.info(r.text)
+                    tree = ET.fromstring(r.text)
+                    access_uri = entry[0].attrib['href']
+                    # find entry with format and crs from metadata (original crs)
+                    # http://www.opengis.net/def/crs/EPSG/25832 or ...
+                    # 1. look for entry with mimetype image/tiff
+                    entry = tree.find("./{http://www.w3.org/2005/Atom}entry/{http://www.w3.org/2005/Atom}category[@term='http://www.opengis.net/def/crs/EPSG/" + str(epsg_id) + "']/../{http://www.w3.org/2005/Atom}link[@type='image/tiff']")
+                    if entry is not None:
+                        possible_dataset_type = 'raster'
+                    # 2. look for entries with mimetype application/json; subtype=geojson
+                    entry = tree.find("./{http://www.w3.org/2005/Atom}entry/{http://www.w3.org/2005/Atom}category[@term='http://www.opengis.net/def/crs/EPSG/" + str(epsg_id) + "']/../{http://www.w3.org/2005/Atom}link[@type='application/json; subtype=geojson']")
+                    if entry is not None:
+                        # log.info('found appropriate atom dataset feed with crs from metadata and supported mimetype!')
+                        possible_dataset_type = 'vector'
+                else:
+                    error_messages.append('ATOM Feed: No link to dataset feed for Spatial Dataset Identifier found in service feed')
                 # check returnable formats
                 # need to read all hrefs from dataset feed!
                 # check uri for service feed
                 # check if uri to dataset feed is available
                 # parse datasetfeed
                 # extract possible formats/mimetypes and crs
-                possible_dataset_type = 'vector' # or possible_dataset_types.append('raster')
         if possible_dataset_type is None:
             error_messages.append('Service is not usable for downloading dataset') 
-        return service_type, service_version, possible_dataset_type, access_uri, service_resource_name, error_messages
+        return_object['service_type'] = service_type
+        return_object['service_version'] = service_version
+        return_object['possible_dataset_type'] = possible_dataset_type
+        return_object['access_uri'] = access_uri
+        return_object['service_resource_name'] = service_resource_name
+        return_object['error_messages'] = error_messages
+        return json.dumps(return_object)
 
     def get_appropriate_service(self, dataset_type:str, spatial_dataset_identifier:str, services, epsg_id):
         if dataset_type == 'raster':
             log.info("check services for raster download")
             for service in services:
-                # option 1: wms with output_format image/tif
+                # option 1: wms with output_format image/png
                 found_service, found_layer = self.check_wms(services[service], spatial_dataset_identifier)
                 if found_service:
                     return found_service, found_layer, 'raster_wms'
-                # option 2: atom feeds with mimetype image/tif
+                # option 2: atom feeds with mimetype image/tiff
                 found_service, found_layer = self.check_atom(services[service], dataset_type, spatial_dataset_identifier, epsg_id)
                 if found_service:
                     return found_service, found_layer, 'raster_atom'
@@ -375,15 +527,52 @@ class SpatialDataCache():
             wms = WebMapService(wms_capabilities_url)
             inc = 0
             for geom_box in bboxes:
-                # load image via owslib
-                # TODO: if server does not support gtiff - download png, generate tfw and convert to gtiff!
-                
-                tmp_image = wms.getmap(layers=[resource_name], styles=['default'], srs='EPSG:4326', bbox=(geom_box.bounds[0], geom_box.bounds[1], geom_box.bounds[2], geom_box.bounds[3]), size=(self.max_pixels, self.max_pixels), format='image/tiff', transparent=True)
-                out = open(metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".tif", 'wb')
+                # load png image via owslib
+                tmp_image = wms.getmap(layers=[resource_name], styles=['default'], srs='EPSG:4326', bbox=(geom_box.bounds[0], geom_box.bounds[1], geom_box.bounds[2], geom_box.bounds[3]), size=(self.max_pixels, self.max_pixels), format='image/png', transparent=True)
+                out = open(self.tmp_output_folder + metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".png", 'wb')
                 out.write(tmp_image.read())
                 out.close()
-                dataset_file_array.append(metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".tif")
-                log.info("image " + str(inc) + " saved!")
+                # convert to geotiff
+                # check if file has colortable - then it will be a 1 band one and we will have to expand the color scheme
+                ds = gdal.Open(self.tmp_output_folder + metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".png")
+                band = ds.GetRasterBand(1)
+                ct = band.GetRasterColorTable()
+                ds = None
+                if ct is not None:
+                    # log.info('png file has colortable!')
+                    # https://gis.stackexchange.com/questions/423450/converting-png-to-geotiff-using-gdal-python
+                    #gdal_translate -of GTiff -a_srs EPSG:4326 -a_ullr -117.119811 32.700376 -117.059864 32.799896 11bit.png OUTPUT.tif
+                    #create_options = gdal.TranslateOptions(creationOptions=['RASTER_TABLE=' + layer_name, 'APPEND_SUBDATASET=YES'])
+                    gdal.Translate(self.tmp_output_folder + metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".tif",
+                                self.tmp_output_folder + metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".png",
+                                width = self.max_pixels,
+                                height = self.max_pixels,
+                                rgbExpand = 'rgba',
+                                outputBounds = [geom_box.bounds[0], geom_box.bounds[3], geom_box.bounds[2], geom_box.bounds[1]], #ulx, uly, lrx, lry
+                                outputSRS="EPSG:4326")
+                else:
+                    # log.info('png file has no colortable!')
+                    # https://gis.stackexchange.com/questions/423450/converting-png-to-geotiff-using-gdal-python
+                    # https://stackoverflow.com/questions/63874859/convert-png-to-geotiff-with-gdal
+                    # gdal_translate -of GTiff -a_srs EPSG:4326 -a_ullr -117.119811 32.700376 -117.059864 32.799896 11bit.png OUTPUT.tif
+                    # create_options = gdal.TranslateOptions(creationOptions=['RASTER_TABLE=' + layer_name, 'APPEND_SUBDATASET=YES'])
+                    gdal.Translate(self.tmp_output_folder + metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".tif",
+                                self.tmp_output_folder + metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".png",
+                                width = self.max_pixels,
+                                height = self.max_pixels,
+                                outputBounds = [geom_box.bounds[0], geom_box.bounds[3], geom_box.bounds[2], geom_box.bounds[1]], #ulx, uly, lrx, lry
+                                outputSRS="EPSG:4326")
+                # delete temporary png file
+                self.clean_tmp_files([self.tmp_output_folder + metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".png"])
+                '''
+                logic for downloading tif files - we don't know, if they are geotiffs - therefor we now use the png format
+                '''
+                #tmp_image = wms.getmap(layers=[resource_name], styles=['default'], srs='EPSG:4326', bbox=(geom_box.bounds[0], geom_box.bounds[1], geom_box.bounds[2], geom_box.bounds[3]), size=(self.max_pixels, self.max_pixels), format='image/tiff', transparent=True)
+                #out = open(metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".tif", 'wb')
+                #out.write(tmp_image.read())
+                #out.close()
+                dataset_file_array.append(self.tmp_output_folder + metadata_info['fileidentifier'] + "_wms_" + resource_name + "_" + str(inc) + ".tif")
+                # log.info("image " + str(inc) + " saved!")
                 inc = inc + 1
         if download_service_type == 'vector_oaf':
             ogc_api_features_base_url = download_service.distribution.online[0].url
@@ -413,10 +602,10 @@ class SpatialDataCache():
             for bbox in bboxes:
                 download_url = ogc_api_features_base_url + "?f=json&limit=100&bbox=" + str(bbox.bounds[0]) + "," + str(bbox.bounds[1]) + "," + str(bbox.bounds[2]) + "," + str(bbox.bounds[3])
                 r = requests.get(download_url)
-                out = open(metadata_info['fileidentifier'] + "_json _" + str(inc_bboxes) + ".geojson", 'w')
+                out = open(self.tmp_output_folder + metadata_info['fileidentifier'] + "_json _" + str(inc_bboxes) + ".geojson", 'w')
                 out.write(r.text)
                 out.close()
-                dataset_file_array.append(metadata_info['fileidentifier'] + "_json _" + str(inc_bboxes) + ".geojson")
+                dataset_file_array.append(self.tmp_output_folder + metadata_info['fileidentifier'] + "_json _" + str(inc_bboxes) + ".geojson")
                 inc_bboxes = inc_bboxes + 1
                 log.info("json saved!")
         if download_service_type == 'raster_atom' or download_service_type == 'vector_atom':
@@ -457,10 +646,10 @@ class SpatialDataCache():
                             # download geojson data
                             r = requests.get(link.attrib['href'])
                             # save result to file 
-                            out = open(metadata_info['fileidentifier'] + "_" + file_suffix + "_" + str(inc_bboxes) + "." + file_suffix, 'wb')
+                            out = open(self.tmp_output_folder + metadata_info['fileidentifier'] + "_" + file_suffix + "_" + str(inc_bboxes) + "." + file_suffix, 'wb')
                             out.write(r.content)
                             out.close()
-                            dataset_file_array.append(metadata_info['fileidentifier'] + "_" + file_suffix + "_" + str(inc_bboxes) + "." + file_suffix)
+                            dataset_file_array.append(self.tmp_output_folder + metadata_info['fileidentifier'] + "_" + file_suffix + "_" + str(inc_bboxes) + "." + file_suffix)
                             inc_bboxes = inc_bboxes + 1
                             log.info("tile saved!")
             else:
@@ -480,39 +669,45 @@ class SpatialDataCache():
         delta_lat_deg = polygon_box[3] - polygon_box[1]
         delta_lon_m = 2 * math.pi * 6378137.0 * math.cos(360 / middle_phi * 2 * math.pi) / 360 * delta_lon_deg
         delta_lat_m = 2 * math.pi * 6378137.0 / 360 * delta_lat_deg
+        # calculate groundResolution from scale
+        # dpi = 150
+        # gR = 0.0254 / dpi * scale 
         if metadata_info['spatial_res_type'] == "groundResolution":
             log.info(metadata_info['spatial_res_value'])
-            # calculate needed pixels in each direction
-            pixel_lat = delta_lat_m / metadata_info['spatial_res_value']
-            pixel_lon = delta_lon_m / metadata_info['spatial_res_value']
-            incs_lat = math.ceil(pixel_lat / self.max_pixels) 
-            incs_lon = math.ceil(pixel_lon / self.max_pixels)
-            # width and height of boxes in deg
-            window_lat = delta_lat_deg / (pixel_lat / self.max_pixels)
-            window_lon = delta_lon_deg / (pixel_lon / self.max_pixels)
-            bboxes = []
-            # calculate lat/lon boxes width pixel width of 3000*3000
-            for i in range(incs_lat):
-                for j in range(incs_lon):
-                    bbox_miny = polygon_box[0] + j * window_lon
-                    bbox_minx = polygon_box[1] + i * window_lat
-                    bbox_maxy = polygon_box[0] + (j + 1) * window_lon
-                    bbox_maxx = polygon_box[1] + (i + 1) * window_lat
-                    geom_box = box(bbox_miny, bbox_minx, bbox_maxy, bbox_maxx)
-                    bboxes.append(geom_box)
-            # for debugging purposes store geojson of boxes to file  
-            geom_boxes_multipolygon = multipolygons(bboxes)
-            geojson_boxes = to_geojson(geom_boxes_multipolygon)
-            log.info(geojson_boxes)  
-            # write to folder 
-            """ 
-            data_file_name = metadata_info['fileidentifier'] + "_wms_bboxes.geojson" 
-            open_option = "w"
-            bboxes_file = open(data_file_name, open_option)
-            bboxes_file.write(geojson_boxes)
-            bboxes_file.close()
-            """
-            return bboxes
+            ground_resolution = metadata_info['spatial_res_value']
+        if metadata_info['spatial_res_type'] == "scaleDenominator":
+            ground_resolution = metadata_info['calculated_ground_resolution']
+        # calculate needed pixels in each direction
+        pixel_lat = delta_lat_m / ground_resolution
+        pixel_lon = delta_lon_m / ground_resolution
+        incs_lat = math.ceil(pixel_lat / self.max_pixels) 
+        incs_lon = math.ceil(pixel_lon / self.max_pixels)
+        # width and height of boxes in deg
+        window_lat = delta_lat_deg / (pixel_lat / self.max_pixels)
+        window_lon = delta_lon_deg / (pixel_lon / self.max_pixels)
+        bboxes = []
+        # calculate lat/lon boxes width pixel width of 3000*3000
+        for i in range(incs_lat):
+            for j in range(incs_lon):
+                bbox_miny = polygon_box[0] + j * window_lon
+                bbox_minx = polygon_box[1] + i * window_lat
+                bbox_maxy = polygon_box[0] + (j + 1) * window_lon
+                bbox_maxx = polygon_box[1] + (i + 1) * window_lat
+                geom_box = box(bbox_miny, bbox_minx, bbox_maxy, bbox_maxx)
+                bboxes.append(geom_box)
+        # for debugging purposes store geojson of boxes to file  
+        geom_boxes_multipolygon = multipolygons(bboxes)
+        geojson_boxes = to_geojson(geom_boxes_multipolygon)
+        # log.info(geojson_boxes)  
+        # write to folder 
+        """ 
+        data_file_name = metadata_info['fileidentifier'] + "_wms_bboxes.geojson" 
+        open_option = "w"
+        bboxes_file = open(data_file_name, open_option)
+        bboxes_file.write(geojson_boxes)
+        bboxes_file.close()
+        """
+        return bboxes
         
     def calculate_feature_bboxes(self, metadata_info, number_of_features:int):
         """
@@ -522,11 +717,11 @@ class SpatialDataCache():
         polygon_box = polygon.bounds
         number_of_boxes = math.ceil(number_of_features / self.max_features)
         # calculate delta lon in meter (lon is first value x)
-        #middle_phi = polygon_box[1] + (polygon_box[3] - polygon_box[1]) / 2
+        # middle_phi = polygon_box[1] + (polygon_box[3] - polygon_box[1]) / 2
         delta_lon_deg = polygon_box[2] - polygon_box[0]
         delta_lat_deg = polygon_box[3] - polygon_box[1]
-        #delta_lon_m = 2 * math.pi * 6378137.0 * math.cos(360 / middle_phi * 2 * math.pi) / 360 * delta_lon_deg
-        #delta_lat_m = 2 * math.pi * 6378137.0 / 360 * delta_lat_deg
+        # delta_lon_m = 2 * math.pi * 6378137.0 * math.cos(360 / middle_phi * 2 * math.pi) / 360 * delta_lon_deg
+        # delta_lat_m = 2 * math.pi * 6378137.0 / 360 * delta_lat_deg
         width = math.sqrt((delta_lon_deg * delta_lat_deg) / number_of_boxes)
         n_rows = math.ceil(delta_lat_deg / width)
         n_columns = math.ceil(delta_lon_deg / width)
@@ -546,7 +741,7 @@ class SpatialDataCache():
         # write to folder
         data_file_name = metadata_info['fileidentifier'] + "_features_bboxes.geojson" 
         open_option = "w"
-        bboxes_file = open(data_file_name, open_option)
+        bboxes_file = open(self.tmp_output_folder + data_file_name, open_option)
         bboxes_file.write(geojson_boxes)
         bboxes_file.close()
         return bboxes
@@ -595,81 +790,153 @@ class SpatialDataCache():
         return ET.tostring(tree)
 
     def check_options(self):
+        downloadable_datasets = []
+        start_time_check = time.time()
         for dataset in self.data_configuration['datasets']:
-            log.info(dataset['file_identifier'])
-            #self.resolve_dataset_metadata(dataset['file_identifier'])
-            metadata = self.resolve_dataset_metadata(dataset['file_identifier'])
+            log.info(dataset['resourceidentifier'])
+            downloadable_dataset = {}
+            start_time_dataset_metadata = time.time()
+            metadata = self.get_metadata_by_resourceidentifier(dataset['resourceidentifier'])
+            downloadable_dataset['spatial_dataset_identifier'] = dataset['resourceidentifier']
+            downloadable_dataset['time_to_resolve_dataset'] = str(time.time() - start_time_dataset_metadata)
+            downloadable_dataset['error_messages'] = []
             if metadata:
-                log.info("metadata found")
                 metadata_info = self.extract_info_from_dataset_metadata(metadata)
-                log.info("Try to download " + metadata_info['title'] + " - type: " + dataset['type'] + " - sdi: " + str(metadata_info['spatial_dataset_identifier']))
-                services = self.get_coupled_services(str(metadata_info['spatial_dataset_identifier']))
-                log.info("number of found services: " + str(len(services)))
+                downloadable_dataset['title'] = metadata_info['title']
+                # overwrite with value from remote xml - should be identical to configured value
+                downloadable_dataset['spatial_dataset_identifier'] = metadata_info['spatial_dataset_identifier']
+                downloadable_dataset['fileidentifier'] = metadata_info['fileidentifier']
+                downloadable_dataset['format'] = metadata_info['format']
+                downloadable_dataset['epsg_id'] = metadata_info['epsg_id']
+               
+                #if metadata_info['spatial_dataset_identifier'] is None:
+                #    downloadable_dataset['error_messages'].append('')
+                downloadable_dataset['services'] = []
+                start_time_services_metadata = time.time()
+                # check if bbox of metadata intersects the area_of_interest polygon 
+                polygon = from_geojson(self.area_of_interest_geojson)
+                bbox_geom = box(float(metadata_info['minx']), float(metadata_info['miny']), float(metadata_info['maxx']), float(metadata_info['maxy']))
+                if intersects(polygon, bbox_geom):
+                    #log.info("Try to download " + metadata_info['title'] + " - type: " + dataset['type'] + " - sdi: " + str(metadata_info['spatial_dataset_identifier']))
+                    services = self.get_coupled_services(str(metadata_info['spatial_dataset_identifier']))
+                else :
+                    # unset fileidentifier because it does not make sense to download this dataset 
+                    downloadable_dataset['fileidentifier'] = ''
+                    downloadable_dataset['error_messages'].append('Metadata and the area of interest have no intersections!')
+                downloadable_dataset['time_to_resolve_services'] = str(time.time() - start_time_services_metadata)
+            
+                #log.info("number of found services: " + str(len(services)))
                 # debug - show service information
                 for service in services:
-                    log.info(services[service].serviceidentification.type + ' - ' + services[service].serviceidentification.version + ' : ' + services[service].distribution.online[0].url)
-                    log.info(json.dumps(self.check_download_options(services[service], str(metadata_info['spatial_dataset_identifier']))))
+
+                    downloadable_dataset['services'].append(json.loads(self.check_download_options(services[service], str(metadata_info['spatial_dataset_identifier']), str(metadata_info['epsg_id']))))
+                    # log.info(services[service].serviceidentification.type + ' - ' + services[service].serviceidentification.version + ' : ' + services[service].distribution.online[0].url)
+                    # log.info(self.check_download_options(services[service], str(metadata_info['spatial_dataset_identifier']), str(metadata_info['epsg_id'])))
                     # service_type, service_version, possible_dataset_type, access_uri, error_messages = self.check_download_options(services[service], str(metadata_info['spatial_dataset_identifier']))
+            else:
+                downloadable_dataset['error_messages'].append('Metadata could not be found in catalogue!')
+            downloadable_datasets.append(downloadable_dataset)
+        #log.info(json.dumps(downloadable_datasets))
+        return json.dumps(downloadable_datasets)
+
+    def get_metadata_by_resourceidentifier(self, spatial_dataset_identifier):
+        dataset_query = PropertyIsEqualTo('csw:ResourceIdentifier', spatial_dataset_identifier)
+        # look for srv:serviceTypeVersion to find the atom feeds
+        self.csw.getrecords2(constraints=[dataset_query], maxrecords=20, esn = 'full', outputschema='http://www.isotc211.org/2005/gmd')
+        if len(self.csw.records) == 1:
+            return list(self.csw.records.values())[0]
+        else:
+            log.info('More than one or no record for resourceidentifier *' + spatial_dataset_identifier + '* found in catalog. Number of records: ' + str(len(self.csw.records)))
+            return False
 
     def generate_cache(self):
         """function to start generation of cache"""
         # delete geopackage if exists
-        if os.path.isfile(self.output_filename + '.gpkg'):
-            os.remove(self.output_filename + '.gpkg')
+        log.info(self.tmp_output_folder)
+
+        if os.path.isfile(self.tmp_output_folder + self.output_filename + '.gpkg'):
+            os.remove(self.tmp_output_folder + self.output_filename + '.gpkg')
         # initialize new geopackage
-        gpkg = Gpkg(self.output_filename + '.gpkg')
+        gpkg = Gpkg(self.tmp_output_folder + self.output_filename + '.gpkg')
         # Initialize one raster object to build up metadata tables - they are only build when importing raster data!
         # https://towardsdatascience.com/use-python-to-convert-polygons-to-raster-with-gdal-rasterizelayer-b0de1ec3267
         # https://www.programcreek.com/python/example/101827/gdal.RasterizeLayer
         self.create_initial_mask()
-        gpkg.add_tif_layer('area_of_interest_mask_tif', 'area_of_interest.tif')
-        gpkg.add_geojson_layer( "area_of_interest_geojson", "area_of_interest.geojson")
+        gpkg.add_tif_layer('area_of_interest_mask_tif', self.tmp_output_folder + 'area_of_interest.tif')
+        gpkg.add_geojson_layer( "area_of_interest_geojson", self.tmp_output_folder + "area_of_interest.geojson")
+        downloadable_datasets = []
         for dataset in self.data_configuration['datasets']:
-            log.info(dataset['file_identifier'])
-            #self.resolve_dataset_metadata(dataset['file_identifier'])
-            metadata = self.resolve_dataset_metadata(dataset['file_identifier'])
+            downloadable_dataset = {}
+            log.info(dataset['resourceidentifier'])
+            start_time_dataset_metadata = time.time()
+            downloadable_dataset['spatial_dataset_identifier'] = dataset['resourceidentifier']
+            metadata = self.get_metadata_by_resourceidentifier(dataset['resourceidentifier'])
+            downloadable_dataset['time_to_resolve_dataset'] = str(time.time() - start_time_dataset_metadata)
+            downloadable_dataset['error_messages'] = []
             if metadata:
-                log.info("metadata found")
                 metadata_info = self.extract_info_from_dataset_metadata(metadata)
+                downloadable_dataset['title'] = metadata_info['title']
+                # add fileidentifier to dataset object
+                dataset['file_identifier'] = metadata_info['fileidentifier']
+                # overwrite with value from remote xml - should be identical to configured value
+                downloadable_dataset['spatial_dataset_identifier'] = metadata_info['spatial_dataset_identifier']
+                downloadable_dataset['format'] = metadata_info['format']
+                downloadable_dataset['epsg_id'] = metadata_info['epsg_id']
+                # log.info("metadata found")
                 log.info("Try to download " + metadata_info['title'] + " - type: " + dataset['type'] + " - sdi: " + str(metadata_info['spatial_dataset_identifier']))
                 # delete old cache files
                 if dataset['type'] == 'raster' and os.path.isfile(dataset['file_identifier'] + '.tif'):
-                    os.remove(dataset['file_identifier'] + '.tif')
+                    os.remove(self.tmp_output_folder + dataset['file_identifier'] + '.tif')
                 if dataset['type'] == 'vector' and os.path.isfile(dataset['file_identifier'] + '.geojson'):
-                    os.remove(dataset['file_identifier'] + '.geojson')
+                    os.remove(self.tmp_output_folder + dataset['file_identifier'] + '.geojson')
+                if str(metadata_info['spatial_dataset_identifier']) == '':
+                    log.info('No spatial dataset identifier found in dataset metadata record! Cannot resolve services.')
+                    continue
+
+                downloadable_dataset['download_process_metadata'] = {}
+                download_process_metadata = {}
+                start_time_services_metadata = time.time()
                 services = self.get_coupled_services(str(metadata_info['spatial_dataset_identifier']))
+                downloadable_dataset['time_to_resolve_services'] = str(time.time() - start_time_services_metadata)
                 log.info("number of found services: " + str(len(services)))
                 # debug - show service information
                 for service in services:
                     log.info(services[service].serviceidentification.type + ' - ' + services[service].serviceidentification.version + ' : ' + services[service].distribution.online[0].url)
 
                 download_service, resource_name, download_service_type = self.get_appropriate_service(dataset['type'], str(metadata_info['spatial_dataset_identifier']), services, metadata_info['epsg_id'])
+                
                 log.info("name of resource: " + str(resource_name))
                 log.info(download_service)
                 # get metadata string
                 new_metadata_xml = self.derive_metadata(metadata.xml, dataset['type'])
                 polygon = from_geojson(self.area_of_interest_geojson)
                 polygon_box = polygon.bounds
-                # TODO:  write area of interest to geopackage - as gtiff! - to generate the metadata structure
                 if download_service:
+                    start_download_time = time.time()
                     dataset_file_array = self.download_datacache(metadata_info, download_service, resource_name, dataset['type'], download_service_type)
+                    download_process_metadata['download_time'] = str(time.time() - start_download_time)
                     if len(dataset_file_array) > 0:
+                        download_process_metadata['dataset_type'] = dataset['type']
                         if dataset['type'] == 'raster':
                             dataset_aggregate_filename = dataset['file_identifier'] + '.tif'
                             dataset_bbox_filename = dataset['file_identifier'] + '_wms_bboxes.geojson'
+                            start_aggregation_time = time.time()
                             # when datasets are downloaded via atom feeds, they are in the crs which was given in the dataset metadata
                             if download_service.serviceidentification.version == 'predefined ATOM':
-                                gdal.Warp(dataset_aggregate_filename, dataset_file_array, format="GTiff", srcSRS="EPSG:" + str(metadata_info['epsg_id']), dstSRS="EPSG:4326",
+                                gdal.Warp(self.tmp_output_folder + dataset_aggregate_filename, dataset_file_array, format="GTiff", srcSRS="EPSG:" + str(metadata_info['epsg_id']), dstSRS="EPSG:4326",
                             options=["COMPRESS=LZW", "TILED=YES"])
                             else:
-                                gdal.Warp(dataset_aggregate_filename, dataset_file_array, format="GTiff",
+                                gdal.Warp(self.tmp_output_folder + dataset_aggregate_filename, dataset_file_array, format="GTiff",
                             options=["COMPRESS=LZW", "TILED=YES"])
+                            download_process_metadata['aggregation_time'] = str(time.time() - start_aggregation_time)
                             # add to geopackage
-                            gpkg.add_tif_layer(slugify(metadata_info['title']) + '_' + dataset['file_identifier'] + '_tif', dataset['file_identifier'] + '.tif')
+                            start_import_time = time.time() 
+                            gpkg.add_tif_layer(slugify(metadata_info['title']) + '_' + dataset['file_identifier'] + '_tif', self.tmp_output_folder + dataset['file_identifier'] + '.tif')
+                            download_process_metadata['import_time'] = str(time.time() - start_import_time)
                             md_id = gpkg.add_table_metadata(slugify(metadata_info['title']) + '_' + dataset['file_identifier'] + '_tif', new_metadata_xml.decode("utf-8"))
                             tmp_files = dataset_file_array
-                            tmp_files.append(dataset_aggregate_filename)
-                            tmp_files.append(dataset_bbox_filename)
+                            tmp_files.append(self.tmp_output_folder + dataset_aggregate_filename)
+                            tmp_files.append(self.tmp_output_folder + dataset_bbox_filename)
                             #self.clean_tmp_files(tmp_files)
                         if dataset['type'] == 'vector':
                             dataset_aggregate_filename = dataset['file_identifier'] + '.geojson'
@@ -678,17 +945,22 @@ class SpatialDataCache():
                                 epsg_id = metadata_info['epsg_id']
                             else:
                                 epsg_id = 4326
+                            start_aggregation_time = time.time() 
                             for dataset_file in dataset_file_array:
                                 #gdal.VectorTranslate(dataset['file_identifier'] + '.geojson', dataset_file, accessMode="append", srcSRS="EPSG:" + str(epsg_id), dstSRS="EPSG:4326")
-                                gdal.VectorTranslate(dataset_aggregate_filename, dataset_file, accessMode="append", srcSRS="EPSG:" + str(epsg_id), dstSRS="EPSG:4326", spatFilter=polygon_box, spatSRS='EPSG:4326')
+                                gdal.VectorTranslate(self.tmp_output_folder + dataset_aggregate_filename, dataset_file, accessMode="append", srcSRS="EPSG:" + str(epsg_id), dstSRS="EPSG:4326", spatFilter=polygon_box, spatSRS='EPSG:4326')
+                            download_process_metadata['aggregation_time'] = str(time.time() - start_aggregation_time)
                             # add to geopackage
-                            gpkg.add_geojson_layer(slugify(metadata_info['title']) + '_' + dataset['file_identifier'] + '_geojson', dataset['file_identifier'] + '.geojson')
+                            start_import_time = time.time() 
+                            gpkg.add_geojson_layer(slugify(metadata_info['title']) + '_' + dataset['file_identifier'] + '_geojson', self.tmp_output_folder + dataset['file_identifier'] + '.geojson')
+                            download_process_metadata['import_time'] = str(time.time() - start_import_time)
                             md_id = gpkg.add_table_metadata(slugify(metadata_info['title']) + '_' + dataset['file_identifier'] + '_geojson', new_metadata_xml.decode("utf-8"))
                             tmp_files = dataset_file_array
-                            tmp_files.append(dataset_aggregate_filename)
-                            tmp_files.append(dataset_bbox_filename)
+                            tmp_files.append(self.tmp_output_folder + dataset_aggregate_filename)
+                            tmp_files.append(self.tmp_output_folder + dataset_bbox_filename)
                         # delete downloaded files and aggregate file
                         log.info("clean tmp files: " + json.dumps(tmp_files))
+                        # TODO: delete all png files 
                         self.clean_tmp_files(tmp_files)
                         # store original metadata as a parent metadata into geopackage
                         if md_id:
@@ -698,8 +970,19 @@ class SpatialDataCache():
                         # new_gpkg.add_geojson_layer( "area_of_interest_geojson", "area_of_interest.geojson")
                     else:
                         log.info("No download option for dataset " + metadata_info['title'] + " (" + metadata_info['spatial_dataset_identifier'] + ")" + " found in catalogue")
+                downloadable_dataset['download_process_metadata'] = download_process_metadata
+            else:
+                downloadable_dataset['error_messages'].append('No metadata found for spatial dataset identifier')
+            downloadable_datasets.append(downloadable_dataset)
+        log.info(json.dumps(downloadable_datasets))   
         # delete area_of_interest files
-        self.clean_tmp_files([self.area_of_interest_filename + '.tif', self.area_of_interest_filename + '.geojson',])
+        self.clean_tmp_files([self.tmp_output_folder + self.area_of_interest_filename + '.tif', self.tmp_output_folder + self.area_of_interest_filename + '.geojson',])
         # show list of cached datasets
-        #TODO: test for empty gpkg
         gpkg.get_content_list2()
+        # move result gpkg to self.output_folder 
+        os.rename(self.tmp_output_folder + self.output_filename + '.gpkg', self.output_folder + self.output_filename + '.gpkg');
+        # delete directory self.tmp_output_folder
+        log.info("delete tmp folder: " + self.tmp_output_folder.rstrip('/'))
+        shutil.rmtree(self.tmp_output_folder.rstrip('/'))
+        #TODO: test for empty gpkg
+        
