@@ -38,8 +38,8 @@ Examples
                                         {"resourceidentifier": "http://naturschutz.rlp.de/2b115f1ebeb7b0f8d7362b049d0e0f68", "type": "vector"},
                                       ]
                         }
-    catalogue_uri = "https://gdk.gdi-de.org/gdi-de/srv/ger/csw"
-    cache = SpatialDataCache(dataset_configuration, area_of_interest, catalogue_uri)
+    catalogue_uris = ["https://gdk.gdi-de.org/gdi-de/srv/ger/csw"]
+    cache = SpatialDataCache(dataset_configuration, area_of_interest, catalogue_uris)
 
     json_result = cache.check_options()
     print(json_result)
@@ -84,12 +84,12 @@ Examples
     #                                    ]
     #                        }
 
-    catalogue_uri = "https://vocabulary.geoportal.rlp.de/geonetwork/srv/ger/csw"
+    catalogue_uris = ["https://vocabulary.geoportal.rlp.de/geonetwork/srv/ger/csw"]
     #catalogue_uri = "https://gdk.gdi-de.org/gdi-de/srv/ger/csw"
     #catalogue_uri = "https://inspire-geoportal.ec.europa.eu/GeoportalProxyWebServices/resources/OGCCSW202"
 
 
-    cache = SpatialDataCache(dataset_configuration, area_of_interest, catalogue_uri, output_folder='/tmp/')
+    cache = SpatialDataCache(dataset_configuration, area_of_interest, catalogue_uris, output_folder='/tmp/')
     json_result = cache.check_options()
     print(json_result)
     cache.generate_cache()
